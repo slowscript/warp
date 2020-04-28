@@ -18,6 +18,7 @@ import util
 import transfers
 from ops import ReceiveOp
 from util import TransferDirection, OpStatus
+import time
 
 _ = gettext.gettext
 
@@ -57,8 +58,22 @@ class Server(warp_pb2_grpc.WarpServicer, GObject.Object):
 
         self.start_server()
 
+    def make_service_name(self):
+        def construct_name(n):
+            return "%s.%s" % (n, SERVICE_TYPE)
+
+        hostname = util.get_hostname()
+        srv_name = construct_name(hostname)
+        i = 2
+        while srv_name in self.remote_machines:
+            name = hostname + "_" + str(i)
+            srv_name = construct_name(name)
+            i += 1
+        
+        return srv_name
+
     def start_zeroconf(self):
-        self.zeroconf = Zeroconf()
+        self.service_name = self.make_service_name()
         box_as_props = auth.get_singleton().get_server_cert_b64_dict()
 
         self.info = ServiceInfo(SERVICE_TYPE,
@@ -90,11 +105,14 @@ class Server(warp_pb2_grpc.WarpServicer, GObject.Object):
         info = zeroconf.get_service_info(_type, name)
 
         if info:
-            if name == self.service_name:
-                return
-
             remote_hostname = name.split(".")[0]
+            if "_" in remote_hostname:
+                remote_hostname = remote_hostname.split("_")[0]
+            
             remote_ip = socket.inet_ntoa(info.address)
+
+            if remote_ip == util.get_ip():
+                return
 
             if not auth.get_singleton().process_remote_cert_b64_dict(remote_hostname, info.properties):
                 print("Unable to authenticate with %s (%s)" % (remote_hostname, remote_ip))
@@ -156,10 +174,12 @@ class Server(warp_pb2_grpc.WarpServicer, GObject.Object):
     def emit_server_started(self):
         self.emit("server-started")
 
-    @util._idle
+    @util._async
     def start_discovery_services(self):
-        self.start_zeroconf()
+        self.zeroconf = Zeroconf()
         self.start_remote_lookout()
+        time.sleep(1) # Have time to find services. If there is one with the same name as us, we can then change it
+        self.start_zeroconf()        
 
     @util._async
     def shutdown(self):
